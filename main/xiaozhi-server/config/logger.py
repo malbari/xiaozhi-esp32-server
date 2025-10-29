@@ -63,7 +63,7 @@ def setup_logging():
 
         log_format = log_config.get(
             "log_format",
-            "<green>{time:YYMMDD HH:mm:ss}</green>[{version}_{extra[selected_module]}][<light-blue>{extra[tag]}</light-blue>]-<level>{level}</level>-<light-green>{message}</light-green>",
+            "{time:YYMMDD HH:mm:ss}[{version}_{extra[selected_module]}][{extra[tag]}]-<level>{level}</level>{message}",
         )
         log_format_file = log_config.get(
             "log_format_file",
@@ -84,7 +84,7 @@ def setup_logging():
         logger.remove()
 
         # 输出到控制台
-        logger.add(sys.stdout, format=log_format, level=log_level, filter=formatter)
+        logger.add(sys.stdout, format=log_format, level=log_level, filter=formatter, colorize=False)
 
         # 输出到文件 - 统一目录，按大小轮转
         # 日志文件完整路径

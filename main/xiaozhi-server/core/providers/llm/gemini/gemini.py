@@ -68,6 +68,7 @@ def setup_proxy_env(http_proxy: str | None, https_proxy: str | None):
 
 class LLMProvider(LLMProviderBase):
     def __init__(self, cfg: Dict[str, Any]):
+        log.info("Initializing GeminiLLM provider...")
         self.model_name = cfg.get("model_name", "gemini-2.0-flash")
         self.api_key = cfg["api_key"]
         http_proxy = cfg.get("http_proxy")
@@ -75,24 +76,21 @@ class LLMProvider(LLMProviderBase):
 
         model_key_msg = check_model_key("LLM", self.api_key)
         if model_key_msg:
-            log.bind(tag=TAG).error(model_key_msg)
+            log.error(model_key_msg)
 
         if http_proxy or https_proxy:
-            log.bind(tag=TAG).info(
-                f"检测到Gemini代理配置，开始测试代理连通性和设置代理环境..."
-            )
+            log.info("Proxy configuration detected for GeminiLLM, testing connectivity...")
             setup_proxy_env(http_proxy, https_proxy)
-            log.bind(tag=TAG).info(
-                f"Gemini 代理设置成功 - HTTP: {http_proxy}, HTTPS: {https_proxy}"
-            )
-        # 配置API密钥
+            log.info(f"Proxy setup completed - HTTP: {http_proxy}, HTTPS: {https_proxy}")
+
         genai.configure(api_key=self.api_key)
+        log.info(f"GeminiLLM API key configured. Model name: {self.model_name}")
 
-        # 设置请求超时（秒）
-        self.timeout = cfg.get("timeout", 120)  # 默认120秒
+        self.timeout = cfg.get("timeout", 120)
+        log.info(f"Request timeout set to {self.timeout} seconds.")
 
-        # 创建模型实例
         self.model = genai.GenerativeModel(self.model_name)
+        log.info(f"GeminiLLM GenerativeModel instance created for model: {self.model_name}")
 
         self.gen_cfg = GenerationConfig(
             temperature=0.7,
@@ -100,6 +98,7 @@ class LLMProvider(LLMProviderBase):
             top_k=40,
             max_output_tokens=2048,
         )
+        log.info("GeminiLLM generation config initialized.")
 
     @staticmethod
     def _build_tools(funcs: List[Dict[str, Any]] | None):
@@ -120,42 +119,47 @@ class LLMProvider(LLMProviderBase):
 
     # Gemini文档提到，无需维护session-id，直接用dialogue拼接而成
     def response(self, session_id, dialogue, **kwargs):
+        log.info(f"GeminiLLM response called. Session ID: {session_id}, Dialogue length: {len(dialogue)}")
         yield from self._generate(dialogue, None)
 
     def response_with_functions(self, session_id, dialogue, functions=None):
+        log.info(f"GeminiLLM response_with_functions called. Session ID: {session_id}, Dialogue length: {len(dialogue)}, Functions: {functions is not None}")
         yield from self._generate(dialogue, self._build_tools(functions))
 
     def _generate(self, dialogue, tools):
+        log.info(f"GeminiLLM _generate called. Dialogue length: {len(dialogue)}, Tools: {tools is not None}")
         role_map = {"assistant": "model", "user": "user"}
         contents: list = []
-        # 拼接对话
         for m in dialogue:
             r = m["role"]
+            log.info(f"Processing message with role: {r}")
 
             if r == "assistant" and "tool_calls" in m:
                 tc = m["tool_calls"][0]
-                contents.append(
-                    {
-                        "role": "model",
-                        "parts": [
-                            {
-                                "function_call": {
-                                    "name": tc["function"]["name"],
-                                    "args": json.loads(tc["function"]["arguments"]),
-                                }
-                            }
-                        ],
-                    }
-                )
+                #log.info(f"Assistant message contains tool call: {tc['function']['name']}")
+                #contents.append(
+                #    {
+                #        "role": "model",
+                #        "parts": [
+                #            {
+                #                "function_call": {
+                #                    "name": tc["function"]["name"],
+                #                    "args": json.loads(tc["function"]["arguments"]),
+                #                }
+                #            }
+                #        ],
+                #    }
+                #)
                 continue
 
             if r == "tool":
-                contents.append(
-                    {
-                        "role": "model",
-                        "parts": [{"text": str(m.get("content", ""))}],
-                    }
-                )
+                log.info("Processing tool message.")
+                #contents.append(
+                #    {
+                #        "role": "model",
+                #        "parts": [{"text": str(m.get("content", ""))}],
+                #    }
+                # )
                 continue
 
             contents.append(
@@ -165,21 +169,33 @@ class LLMProvider(LLMProviderBase):
                 }
             )
 
-        stream: GenerateContentResponse = self.model.generate_content(
-            contents=contents,
-            generation_config=self.gen_cfg,
-            tools=tools,
-            stream=True,
-            timeout=self.timeout,
-        )
+        # Log the payload and endpoint
+        log.info(f"GeminiLLM request payload: {json.dumps(contents, ensure_ascii=False)[:1000]}")
+        # Try to print the endpoint used by the Google API (not directly exposed, but we can infer)
+        endpoint_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
+        log.info(f"GeminiLLM API endpoint: {endpoint_url}")
+
+        log.info("Sending request to GeminiLLM model...")
+        try:
+            stream: GenerateContentResponse = self.model.generate_content(
+                contents=contents,
+                generation_config=self.gen_cfg,
+                # tools=tools,                 # commented out to avoid issues with function calls
+                stream=False,                  # changed for testing
+                # timeout=self.timeout,        # seems to be broken
+            )
+        except Exception as e:
+            log.error(f"GeminiLLM API call failed: {e}")
+            raise
 
         try:
             for chunk in stream:
+                log.info("Received chunk from GeminiLLM model.")
                 cand = chunk.candidates[0]
                 for part in cand.content.parts:
-                    # a) 函数调用-通常是最后一段话才是函数调用
                     if getattr(part, "function_call", None):
                         fc = part.function_call
+                        log.info(f"Function call detected in GeminiLLM response: {fc.name}")
                         yield None, [
                             SimpleNamespace(
                                 id=uuid.uuid4().hex,
@@ -193,21 +209,27 @@ class LLMProvider(LLMProviderBase):
                             )
                         ]
                         return
-                    # b) 普通文本
                     if getattr(part, "text", None):
+                        log.info("Text response detected in GeminiLLM chunk.")
                         yield part.text if tools is None else (part.text, None)
+
+        except Exception as e:
+            log.error(f"GeminiLLM stream error: {e}")
+            raise
 
         finally:
             if tools is not None:
-                yield None, None  # function‑mode 结束，返回哑包
+                log.info("Function-mode stream ended, sending dummy package.")
+                yield None, None
 
     # 关闭stream，预留后续打断对话功能的功能方法，官方文档推荐打断对话要关闭上一个流，可以有效减少配额计费和资源占用
     @staticmethod
     def _safe_finish_stream(stream: GenerateContentResponse):
+        log.info("Finishing GeminiLLM stream safely.")
         if hasattr(stream, "resolve"):
-            stream.resolve()  # Gemini SDK version ≥ 0.5.0
+            stream.resolve()
         elif hasattr(stream, "close"):
-            stream.close()  # Gemini SDK version < 0.5.0
+            stream.close()
         else:
-            for _ in stream:  # 兜底耗尽
+            for _ in stream:
                 pass
